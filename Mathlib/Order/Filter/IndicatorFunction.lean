@@ -2,116 +2,131 @@
 Copyright (c) 2020 Zhouhang Zhou. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Zhouhang Zhou, Yury Kudryashov
-
-! This file was ported from Lean 3 source module order.filter.indicator_function
-! leanprover-community/mathlib commit 8631e2d5ea77f6c13054d9151d82b83069680cb1
-! Please do not edit these lines, except to modify the commit id
-! if you have ported upstream changes.
 -/
-import Mathlib.Algebra.IndicatorFunction
-import Mathlib.Order.Filter.AtTopBot
+import Mathlib.Algebra.Group.Indicator
+import Mathlib.Order.CompleteLattice.Finset
+import Mathlib.Order.ConditionallyCompleteLattice.Basic
+import Mathlib.Order.Filter.AtTopBot.Defs
+import Mathlib.Order.Filter.Tendsto
 
 /-!
 # Indicator function and filters
 
-Properties of indicator functions involving `=ᶠ` and `≤ᶠ`.
+Properties of additive and multiplicative indicator functions involving `=ᶠ` and `≤ᶠ`.
 
 ## Tags
 indicator, characteristic, filter
 -/
 
-
-variable {α β M E : Type _}
+variable {α β M E : Type*}
 
 open Set Filter
 
-section Zero
+section One
 
-variable [Zero M] {s t : Set α} {f g : α → M} {a : α} {l : Filter α}
+variable [One M] {s t : Set α} {f g : α → M} {a : α} {l : Filter α}
 
-theorem indicator_eventuallyEq (hf : f =ᶠ[l ⊓ 𝓟 s] g) (hs : s =ᶠ[l] t) :
-    indicator s f =ᶠ[l] indicator t g :=
-  (eventually_inf_principal.1 hf).mp <|
-    hs.mem_iff.mono fun x hst hfg =>
-      by_cases (fun hxs : x ∈ s => by simp only [*, hst.1 hxs, indicator_of_mem]) fun hxs => by
-        simp only [indicator_of_not_mem hxs, indicator_of_not_mem (mt hst.2 hxs)]
-#align indicator_eventually_eq indicator_eventuallyEq
+@[to_additive]
+theorem mulIndicator_eventuallyEq (hf : f =ᶠ[l ⊓ 𝓟 s] g) (hs : s =ᶠ[l] t) :
+    mulIndicator s f =ᶠ[l] mulIndicator t g :=
+  (eventually_inf_principal.1 hf).mp <| hs.mem_iff.mono fun x hst hfg =>
+    by_cases
+      (fun hxs : x ∈ s => by simp only [*, hst.1 hxs, mulIndicator_of_mem])
+      (fun hxs => by simp only [mulIndicator_of_notMem, hxs, mt hst.2 hxs, not_false_eq_true])
 
-end Zero
+end One
 
-section AddMonoid
+section Monoid
 
-variable [AddMonoid M] {s t : Set α} {f g : α → M} {a : α} {l : Filter α}
+variable [Monoid M] {s t : Set α} {f g : α → M} {a : α} {l : Filter α}
 
-theorem indicator_union_eventuallyEq (h : ∀ᶠ a in l, a ∉ s ∩ t) :
-    indicator (s ∪ t) f =ᶠ[l] indicator s f + indicator t f :=
-  h.mono fun _a ha => indicator_union_of_not_mem_inter ha _
-#align indicator_union_eventually_eq indicator_union_eventuallyEq
+@[to_additive]
+theorem mulIndicator_union_eventuallyEq (h : ∀ᶠ a in l, a ∉ s ∩ t) :
+    mulIndicator (s ∪ t) f =ᶠ[l] mulIndicator s f * mulIndicator t f :=
+  h.mono fun _a ha => mulIndicator_union_of_notMem_inter ha _
 
-end AddMonoid
+end Monoid
 
 section Order
 
-variable [Zero β] [Preorder β] {s t : Set α} {f g : α → β} {a : α} {l : Filter α}
+variable [One β] [Preorder β] {s t : Set α} {f g : α → β} {a : α} {l : Filter α}
 
-theorem indicator_eventuallyLE_indicator (h : f ≤ᶠ[l ⊓ 𝓟 s] g) :
-    indicator s f ≤ᶠ[l] indicator s g :=
-  (eventually_inf_principal.1 h).mono fun _ => indicator_rel_indicator le_rfl
-#align indicator_eventually_le_indicator indicator_eventuallyLE_indicator
+@[to_additive]
+theorem mulIndicator_eventuallyLE_mulIndicator (h : f ≤ᶠ[l ⊓ 𝓟 s] g) :
+    mulIndicator s f ≤ᶠ[l] mulIndicator s g :=
+  (eventually_inf_principal.1 h).mono fun _ => mulIndicator_rel_mulIndicator le_rfl
 
 end Order
 
-theorem Monotone.tendsto_indicator {ι} [Preorder ι] [Zero β] (s : ι → Set α) (hs : Monotone s)
-    (f : α → β) (a : α) :
-    Tendsto (fun i => indicator (s i) f a) atTop (pure <| indicator (⋃ i, s i) f a) := by
-  by_cases h : ∃ i, a ∈ s i
-  · rcases h with ⟨i, hi⟩
-    refine' tendsto_pure.2 ((eventually_ge_atTop i).mono fun n hn => _)
-    rw [indicator_of_mem (hs hn hi) _, indicator_of_mem ((subset_iUnion _ _) hi) _]
-  · have h' : a ∉ ⋃ i, s i := mt mem_iUnion.1 h
-    rw [not_exists] at h
-    simpa only [indicator_of_not_mem, *] using tendsto_const_pure
-#align monotone.tendsto_indicator Monotone.tendsto_indicator
+@[to_additive]
+theorem Monotone.mulIndicator_eventuallyEq_iUnion {ι} [Preorder ι] [One β] (s : ι → Set α)
+    (hs : Monotone s) (f : α → β) (a : α) :
+    (fun i => mulIndicator (s i) f a) =ᶠ[atTop] fun _ ↦ mulIndicator (⋃ i, s i) f a := by
+  classical exact hs.piecewise_eventually_eq_iUnion f 1 a
 
-theorem Antitone.tendsto_indicator {ι} [Preorder ι] [Zero β] (s : ι → Set α) (hs : Antitone s)
+@[to_additive]
+theorem Monotone.tendsto_mulIndicator {ι} [Preorder ι] [One β] (s : ι → Set α) (hs : Monotone s)
     (f : α → β) (a : α) :
-    Tendsto (fun i => indicator (s i) f a) atTop (pure <| indicator (⋂ i, s i) f a) := by
-  by_cases h : ∃ i, a ∉ s i
-  · rcases h with ⟨i, hi⟩
-    refine' tendsto_pure.2 ((eventually_ge_atTop i).mono fun n hn => _)
-    rw [indicator_of_not_mem _ _, indicator_of_not_mem _ _]
-    · simp only [mem_iInter, not_forall]
-      exact ⟨i, hi⟩
-    · intro h
-      have := hs hn h
-      contradiction
-  · push_neg  at h
-    simp only [indicator_of_mem, h, mem_iInter.2 h, tendsto_const_pure]
-#align antitone.tendsto_indicator Antitone.tendsto_indicator
+    Tendsto (fun i => mulIndicator (s i) f a) atTop (pure <| mulIndicator (⋃ i, s i) f a) :=
+  tendsto_pure.2 <| hs.mulIndicator_eventuallyEq_iUnion s f a
 
-theorem tendsto_indicator_biUnion_finset {ι} [Zero β] (s : ι → Set α) (f : α → β) (a : α) :
-    Tendsto (fun n : Finset ι => indicator (⋃ i ∈ n, s i) f a) atTop
-      (pure <| indicator (iUnion s) f a) := by
+@[to_additive]
+theorem Antitone.mulIndicator_eventuallyEq_iInter {ι} [Preorder ι] [One β] (s : ι → Set α)
+    (hs : Antitone s) (f : α → β) (a : α) :
+    (fun i => mulIndicator (s i) f a) =ᶠ[atTop] fun _ ↦ mulIndicator (⋂ i, s i) f a := by
+  classical exact hs.piecewise_eventually_eq_iInter f 1 a
+
+@[to_additive]
+theorem Antitone.tendsto_mulIndicator {ι} [Preorder ι] [One β] (s : ι → Set α) (hs : Antitone s)
+    (f : α → β) (a : α) :
+    Tendsto (fun i => mulIndicator (s i) f a) atTop (pure <| mulIndicator (⋂ i, s i) f a) :=
+  tendsto_pure.2 <| hs.mulIndicator_eventuallyEq_iInter s f a
+
+@[to_additive]
+theorem mulIndicator_biUnion_finset_eventuallyEq {ι} [One β] (s : ι → Set α) (f : α → β) (a : α) :
+    (fun n : Finset ι => mulIndicator (⋃ i ∈ n, s i) f a) =ᶠ[atTop]
+      fun _ ↦ mulIndicator (iUnion s) f a := by
   rw [iUnion_eq_iUnion_finset s]
-  refine' Monotone.tendsto_indicator (fun n : Finset ι => ⋃ i ∈ n, s i) _ f a
-  exact fun t₁ t₂ => biUnion_subset_biUnion_left
-#align tendsto_indicator_bUnion_finset tendsto_indicator_biUnion_finset
+  apply Monotone.mulIndicator_eventuallyEq_iUnion
+  exact fun _ _ ↦ biUnion_subset_biUnion_left
 
-theorem Filter.EventuallyEq.support [Zero β] {f g : α → β} {l : Filter α} (h : f =ᶠ[l] g) :
-    Function.support f =ᶠ[l] Function.support g := by
-  filter_upwards [h]with x hx
-  rw [eq_iff_iff]
-  change f x ≠ 0 ↔ g x ≠ 0
-  rw [hx]
-#align filter.eventually_eq.support Filter.EventuallyEq.support
+@[to_additive]
+theorem tendsto_mulIndicator_biUnion_finset {ι} [One β] (s : ι → Set α) (f : α → β) (a : α) :
+    Tendsto (fun n : Finset ι => mulIndicator (⋃ i ∈ n, s i) f a) atTop
+      (pure <| mulIndicator (iUnion s) f a) :=
+  tendsto_pure.2 <| mulIndicator_biUnion_finset_eventuallyEq s f a
 
-theorem Filter.EventuallyEq.indicator [Zero β] {l : Filter α} {f g : α → β} {s : Set α}
-    (hfg : f =ᶠ[l] g) : s.indicator f =ᶠ[l] s.indicator g :=
-  indicator_eventuallyEq (hfg.filter_mono inf_le_left) EventuallyEq.rfl
-#align filter.eventually_eq.indicator Filter.EventuallyEq.indicator
+@[to_additive]
+protected theorem Filter.EventuallyEq.mulSupport [One β] {f g : α → β} {l : Filter α}
+    (h : f =ᶠ[l] g) :
+    Function.mulSupport f =ᶠ[l] Function.mulSupport g :=
+  h.preimage ({1}ᶜ : Set β)
 
-theorem Filter.EventuallyEq.indicator_zero [Zero β] {l : Filter α} {f : α → β} {s : Set α}
-    (hf : f =ᶠ[l] 0) : s.indicator f =ᶠ[l] 0 := by
-  refine' hf.indicator.trans _
-  rw [indicator_zero']
-#align filter.eventually_eq.indicator_zero Filter.EventuallyEq.indicator_zero
+@[to_additive]
+protected theorem Filter.EventuallyEq.mulIndicator [One β] {l : Filter α} {f g : α → β} {s : Set α}
+    (hfg : f =ᶠ[l] g) : s.mulIndicator f =ᶠ[l] s.mulIndicator g :=
+  mulIndicator_eventuallyEq (hfg.filter_mono inf_le_left) EventuallyEq.rfl
+
+@[to_additive]
+theorem Filter.EventuallyEq.mulIndicator_one [One β] {l : Filter α} {f : α → β} {s : Set α}
+    (hf : f =ᶠ[l] 1) : s.mulIndicator f =ᶠ[l] 1 :=
+  hf.mulIndicator.trans <| by rw [mulIndicator_one']
+
+@[to_additive]
+theorem Filter.EventuallyEq.of_mulIndicator [One β] {l : Filter α} {f : α → β}
+    (hf : ∀ᶠ x in l, f x ≠ 1) {s t : Set α} (h : s.mulIndicator f =ᶠ[l] t.mulIndicator f) :
+    s =ᶠ[l] t := by
+  have : ∀ {s : Set α}, Function.mulSupport (s.mulIndicator f) =ᶠ[l] s := fun {s} ↦ by
+    rw [mulSupport_mulIndicator]
+    exact (hf.mono fun x hx ↦ and_iff_left hx).set_eq
+  exact this.symm.trans <| h.mulSupport.trans this
+
+@[to_additive]
+theorem Filter.EventuallyEq.of_mulIndicator_const [One β] {l : Filter α} {c : β} (hc : c ≠ 1)
+    {s t : Set α} (h : s.mulIndicator (fun _ ↦ c) =ᶠ[l] t.mulIndicator fun _ ↦ c) : s =ᶠ[l] t :=
+  .of_mulIndicator (Eventually.of_forall fun _ ↦ hc) h
+
+@[to_additive]
+theorem Filter.mulIndicator_const_eventuallyEq [One β] {l : Filter α} {c : β} (hc : c ≠ 1)
+    {s t : Set α} : s.mulIndicator (fun _ ↦ c) =ᶠ[l] t.mulIndicator (fun _ ↦ c) ↔ s =ᶠ[l] t :=
+  ⟨.of_mulIndicator_const hc, mulIndicator_eventuallyEq .rfl⟩

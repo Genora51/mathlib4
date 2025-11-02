@@ -23,8 +23,8 @@ Mathlib 4.
 affine map, derivative, differentiability
 -/
 
-variable {𝕜 : Type _} [NontriviallyNormedField 𝕜]
-  {E : Type _} [NormedAddCommGroup E] [NormedSpace 𝕜 E]
+variable {𝕜 : Type*} [NontriviallyNormedField 𝕜]
+  {E : Type*} [NormedAddCommGroup E] [NormedSpace 𝕜 E]
   (f : 𝕜 →ᵃ[𝕜] E) {a b : E} {L : Filter 𝕜} {s : Set 𝕜} {x : 𝕜}
 
 namespace AffineMap
@@ -58,7 +58,7 @@ protected theorem differentiableOn : DifferentiableOn 𝕜 f s := fun _ _ ↦ f.
 ### Line map
 
 In this section we specialize some lemmas to `AffineMap.lineMap` because this map is very useful to
-deduce higher dimensional lemmas from one-dimensional versions.
+deduce higher-dimensional lemmas from one-dimensional versions.
 -/
 
 theorem hasStrictDerivAt_lineMap : HasStrictDerivAt (lineMap a b) (b - a) x := by

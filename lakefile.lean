@@ -2,48 +2,182 @@ import Lake
 
 open Lake DSL
 
-def moreServerArgs := #[
-  "-Dpp.unicode.fun=true" -- pretty-prints `fun a ↦ b`
+/-!
+## Mathlib dependencies on upstream projects
+-/
+
+require "leanprover-community" / "batteries" @ git "main"
+require "leanprover-community" / "Qq" @ git "master"
+require "leanprover-community" / "aesop" @ git "master"
+require "leanprover-community" / "proofwidgets" @ git "v0.0.77" -- ProofWidgets should always be pinned to a specific version
+  with NameMap.empty.insert `errorOnBuild
+    "ProofWidgets not up-to-date. \
+    Please run `lake exe cache get` to fetch the latest ProofWidgets. \
+    If this does not work, report your issue on the Lean Zulip."
+require "leanprover-community" / "importGraph" @ git "main"
+require "leanprover-community" / "LeanSearchClient" @ git "main"
+require "leanprover-community" / "plausible" @ git "main"
+
+
+/-!
+## Options for building mathlib
+-/
+
+/-- These options are used as `leanOptions`, prefixed by `` `weak``, so that
+`lake build` uses them, as well as `Archive` and `Counterexamples`. -/
+abbrev mathlibOnlyLinters : Array LeanOption := #[
+  ⟨`linter.mathlibStandardSet, true⟩,
+  ⟨`linter.checkInitImports, true⟩,
+  ⟨`linter.allScriptsDocumented, true⟩,
+  ⟨`linter.pythonStyle, true⟩,
+  ⟨`linter.style.longFile, .ofNat 1500⟩,
+  -- ⟨`linter.nightlyRegressionSet, true⟩,
+  -- `latest_import.yml` uses this comment: if you edit it, make sure that the workflow still works
 ]
 
--- These settings only apply during `lake build`, but not in VSCode editor.
-def moreLeanArgs := #[
-  "-DwarningAsError=true"
-] ++ moreServerArgs
+/-- These options are passed as `leanOptions` to building mathlib, as well as the
+`Archive` and `Counterexamples`. (`tests` omits the first two options.) -/
+abbrev mathlibLeanOptions := #[
+    ⟨`pp.unicode.fun, true⟩, -- pretty-prints `fun a ↦ b`
+    ⟨`autoImplicit, false⟩,
+    ⟨`maxSynthPendingDepth, .ofNat 3⟩
+  ] ++ -- options that are used in `lake build`
+    mathlibOnlyLinters.map fun s ↦ { s with name := `weak ++ s.name }
 
 package mathlib where
-  moreServerArgs := moreServerArgs
+  testDriver := "MathlibTest"
+  -- These are additional settings which do not affect the lake hash,
+  -- so they can be enabled in CI and disabled locally or vice versa.
+  -- Warning: Do not put any options here that actually change the olean files,
+  -- or inconsistent behavior may result
+  -- weakLeanArgs := #[]
+
+/-!
+## Mathlib libraries
+-/
 
 @[default_target]
 lean_lib Mathlib where
-  moreLeanArgs := moreLeanArgs
+  -- Enforce Mathlib's default linters and style options.
+  leanOptions := mathlibLeanOptions
 
-@[default_target]
-lean_exe runLinter where
-  root := `scripts.runLinter
-  supportInterpreter := true
+-- NB. When adding further libraries, check if they should be excluded from `getLeanLibs` in
+-- `scripts/mk_all.lean`.
+lean_lib Cache
+lean_lib LongestPole
 
-meta if get_config? doc = some "on" then -- do not download and build doc-gen4 by default
-require «doc-gen4» from git "https://github.com/leanprover/doc-gen4" @ "main"
+lean_lib MathlibTest where
+  globs := #[.submodules `MathlibTest]
 
-require std from git "https://github.com/leanprover/std4" @ "main"
-require Qq from git "https://github.com/gebner/quote4" @ "master"
-require aesop from git "https://github.com/JLimperg/aesop" @ "master"
+lean_lib Archive where
+  leanOptions := mathlibLeanOptions
 
-require proofwidgets from git "https://github.com/EdAyers/ProofWidgets4" @ "v0.0.11"
+lean_lib Counterexamples where
+  leanOptions := mathlibLeanOptions
 
-lean_lib Cache where
-  moreLeanArgs := moreLeanArgs
-  roots := #[`Cache]
+/-- Additional documentation in the form of modules that only contain module docstrings. -/
+lean_lib docs where
+  roots := #[`docs]
 
+/-!
+## Executables provided by Mathlib
+-/
+
+/--
+`lake exe autolabel 150100` adds a topic label to PR `150100` if there is a unique choice.
+This requires GitHub CLI `gh` to be installed!
+
+Calling `lake exe autolabel` without a PR number will print the result without applying
+any labels online.
+-/
+lean_exe autolabel where
+  srcDir := "scripts"
+
+/-- `lake exe cache get` retrieves precompiled `.olean` files from a central server. -/
 lean_exe cache where
   root := `Cache.Main
 
-lean_lib MathlibExtras where
-  roots := #[`MathlibExtras]
+/-- `lake exe check-yaml` verifies that all declarations referred to in `docs/*.yaml` files exist. -/
+lean_exe «check-yaml» where
+  srcDir := "scripts"
+  supportInterpreter := true
 
-lean_lib Archive where
-  roots := #[`Archive]
+/-- `lake exe mk_all` constructs the files containing all imports for a project. -/
+lean_exe mk_all where
+  srcDir := "scripts"
+  supportInterpreter := true
+  -- Executables which import `Lake` must set `-lLake`.
+  weakLinkArgs := #["-lLake"]
 
-lean_lib Counterexamples where
-  roots := #[`Counterexamples]
+/-- `lake exe lint-style` runs text-based style linters. -/
+lean_exe «lint-style» where
+  srcDir := "scripts"
+  supportInterpreter := true
+  -- Executables which import `Lake` must set `-lLake`.
+  weakLinkArgs := #["-lLake"]
+
+/--
+`lake exe pole` queries the Mathlib speedcenter for build times for the current commit,
+and then calculates the longest pole
+(i.e. the sequence of files you would be waiting for during a infinite parallelism build).
+-/
+lean_exe pole where
+  root := `LongestPole.Main
+  supportInterpreter := true
+  -- Executables which import `Lake` must set `-lLake`.
+  weakLinkArgs := #["-lLake"]
+
+/--
+`lake exe unused module_1 ... module_n` will analyze unused transitive imports in a given sequence.
+The script expects the sequence to be in "reverse order", i.e. files imported later in `Mathlib` should
+come earlier in the sequence.
+
+Outputs a markdown file (called  `unused.md` by default) and a number of `lake exe graph` commands
+highlighting particular ranges of transitively unused imports.
+
+Typically this should be run via `scripts/unused_in_pole.sh`.
+-/
+lean_exe unused where
+  root := `LongestPole.Unused
+  supportInterpreter := true
+  -- Executables which import `Lake` must set `-lLake`.
+  weakLinkArgs := #["-lLake"]
+
+lean_exe mathlib_test_executable where
+  root := `MathlibTest.MathlibTestExecutable
+
+/-!
+## Other configuration
+-/
+
+/--
+When a package depending on Mathlib updates its dependencies,
+update its toolchain to match Mathlib's and fetch the new cache.
+-/
+post_update pkg do
+  let rootPkg ← getRootPackage
+  if rootPkg.name = pkg.name then
+    return -- do not run in Mathlib itself
+  if (← IO.getEnv "MATHLIB_NO_CACHE_ON_UPDATE") != some "1" then
+    -- Check if Lake version matches toolchain version
+    let toolchainFile := rootPkg.dir / "lean-toolchain"
+    let toolchainContent ← IO.FS.readFile toolchainFile
+    let toolchainVersion := match toolchainContent.trim.splitOn ":" with
+      | [_, version] => version
+      | _ => toolchainContent.trim  -- fallback to full content if format is unexpected
+    if Lean.versionString ≠ toolchainVersion then
+      IO.println s!"Not running `lake exe cache get` yet, \
+        as the `lake` version does not match the toolchain version in the project.\n\
+        You should run `lake exe cache get` manually."
+      return
+    let exeFile ← runBuild cache.fetch
+    -- Run the command in the root package directory,
+    -- which is the one that holds the .lake folder and lean-toolchain file.
+    let cwd ← IO.Process.getCurrentDir
+    let exitCode ← try
+      IO.Process.setCurrentDir rootPkg.dir
+      env exeFile.toString #["get"]
+    finally
+      IO.Process.setCurrentDir cwd
+    if exitCode ≠ 0 then
+      error s!"{pkg.name}: failed to fetch cache"

@@ -2,11 +2,6 @@
 Copyright (c) 2018 Simon Hudon. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Simon Hudon
-
-! This file was ported from Lean 3 source module control.bitraversable.basic
-! leanprover-community/mathlib commit 6f1d45dcccf674593073ee4e54da10ba35aedbc0
-! Please do not edit these lines, except to modify the commit id
-! if you have ported upstream changes.
 -/
 import Mathlib.Control.Bifunctor
 import Mathlib.Control.Traversable.Basic
@@ -29,8 +24,8 @@ and value respectively with `Bitraverse f g : AList key val → IO (AList key' v
 ## Main definitions
 
 * `Bitraversable`: Bare typeclass to hold the `Bitraverse` function.
-* `IsLawfulBitraversable`: Typeclass for the laws of the `Bitraverse` function. Similar to
-  `IsLawfulTraversable`.
+* `LawfulBitraversable`: Typeclass for the laws of the `Bitraverse` function. Similar to
+  `LawfulTraversable`.
 
 ## References
 
@@ -50,22 +45,19 @@ class Bitraversable (t : Type u → Type u → Type u) extends Bifunctor t where
   bitraverse :
     ∀ {m : Type u → Type u} [Applicative m] {α α' β β'},
       (α → m α') → (β → m β') → t α β → m (t α' β')
-#align bitraversable Bitraversable
 
 export Bitraversable (bitraverse)
 
 /-- A bitraversable functor commutes with all applicative functors. -/
 def bisequence {t m} [Bitraversable t] [Applicative m] {α β} : t (m α) (m β) → m (t α β) :=
   bitraverse id id
-#align bisequence bisequence
 
 open Functor
 
 /-- Bifunctor. This typeclass asserts that a lawless bitraversable bifunctor is lawful. -/
-class IsLawfulBitraversable (t : Type u → Type u → Type u) [Bitraversable t] extends
-  LawfulBifunctor t where
-  -- Porting note: need to specify `m := Id` because `id` no longer has a `Monad` instance
-  id_bitraverse : ∀ {α β} (x : t α β), bitraverse (m := Id) pure pure x = pure x
+class LawfulBitraversable (t : Type u → Type u → Type u) [Bitraversable t] : Prop
+  extends LawfulBifunctor t where
+  id_bitraverse : ∀ {α β} (x : t α β), (bitraverse pure pure x : Id _) = pure x
   comp_bitraverse :
     ∀ {F G} [Applicative F] [Applicative G] [LawfulApplicative F] [LawfulApplicative G]
       {α α' β β' γ γ'} (f : β → F γ) (f' : β' → F γ') (g : α → G β) (g' : α' → G β') (x : t α α'),
@@ -78,11 +70,10 @@ class IsLawfulBitraversable (t : Type u → Type u → Type u) [Bitraversable t]
     ∀ {F G} [Applicative F] [Applicative G] [LawfulApplicative F] [LawfulApplicative G]
       (η : ApplicativeTransformation F G) {α α' β β'} (f : α → F β) (f' : α' → F β') (x : t α α'),
       η (bitraverse f f' x) = bitraverse (@η _ ∘ f) (@η _ ∘ f') x
-#align is_lawful_bitraversable IsLawfulBitraversable
 
-export IsLawfulBitraversable (id_bitraverse comp_bitraverse bitraverse_eq_bimap_id)
+export LawfulBitraversable (id_bitraverse comp_bitraverse bitraverse_eq_bimap_id)
 
-open IsLawfulBitraversable
+open LawfulBitraversable
 
 attribute [higher_order bitraverse_id_id] id_bitraverse
 
@@ -90,4 +81,4 @@ attribute [higher_order bitraverse_comp] comp_bitraverse
 
 attribute [higher_order] binaturality bitraverse_eq_bimap_id
 
-export IsLawfulBitraversable (bitraverse_id_id bitraverse_comp)
+export LawfulBitraversable (bitraverse_id_id bitraverse_comp)

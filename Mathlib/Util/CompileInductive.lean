@@ -3,8 +3,11 @@ Copyright (c) 2023 Parth Shastri. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Parth Shastri, Gabriel Ebner, Mario Carneiro
 -/
+import Mathlib.Init
+import Lean.Elab.Command
 import Lean.Compiler.CSimpAttr
-import Lean.Elab.PreDefinition
+import Lean.Util.FoldConsts
+import Lean.Data.AssocList
 
 /-!
 # Define the `compile_inductive%` command.
@@ -37,6 +40,14 @@ def mkRecNames (all : List Name) (numMotives : Nat) : List Name :=
     all.map mkRecName ++
       (List.range (numMotives - all.length)).map (fun i => main.str s!"rec_{i+1}")
 
+private def addAndCompile' (decl : Declaration) : CoreM Unit := do
+  try addAndCompile decl
+  catch e =>
+    match decl with
+    | .defnDecl val => throwError "while compiling {val.name}: {e.toMessageData}"
+    | .mutualDefnDecl val => throwError "while compiling {val.map (·.name)}: {e.toMessageData}"
+    | _ => unreachable!
+
 /--
 Compile the definition `dv` by adding a second definition `dv✝` with the same body,
 and registering a `csimp`-lemma `dv = dv✝`.
@@ -47,7 +58,7 @@ def compileDefn (dv : DefinitionVal) : MetaM Unit := do
     -- on the original definition
     return ← compileDecl <| .defnDecl dv
   let name ← mkFreshUserName dv.name
-  addAndCompile <| .defnDecl { dv with name }
+  addAndCompile' <| .defnDecl { dv with name }
   let levels := dv.levelParams.map .param
   let old := .const dv.name levels
   let new := .const name levels
@@ -62,6 +73,10 @@ def compileDefn (dv : DefinitionVal) : MetaM Unit := do
 
 open Elab
 
+/-- Returns true if the given declaration has a `@[csimp]` lemma. -/
+def hasCSimpLemma (env : Environment) (n : Name) : Bool :=
+  (Compiler.CSimp.ext.getState env).map.contains n
+
 /--
 `compile_def% Foo.foo` adds compiled code for the definition `Foo.foo`.
 This can be used for type class projections or definitions like `List._sizeOf_1`,
@@ -69,58 +84,52 @@ for which Lean does not generate compiled code by default
 (since it is not used 99% of the time).
 -/
 elab tk:"compile_def% " i:ident : command => Command.liftTermElabM do
-  let n ← resolveGlobalConstNoOverloadWithInfo i
+  let n ← realizeGlobalConstNoOverloadWithInfo i
+  if hasCSimpLemma (← getEnv) n then
+    logWarningAt tk m!"already compiled {n}"
+    return
   let dv ← withRef i <| getConstInfoDefn n
   withRef tk <| compileDefn dv
 
-private def compileSizeOf (iv : InductiveVal) : MetaM Unit := do
-  for name in iv.all do
-    for aux in [name.str "_sizeOf_1", name.str "_sizeOf_inst"] do
-      if let some (.defnInfo dv) := (← getEnv).find? aux then
-        compileDefn dv
-
-private def compileStruct (iv : InductiveVal) (rv : RecursorVal) : MetaM Unit := do
-  let name ← mkFreshUserName rv.name
-  addAndCompile <| .defnDecl { rv with
-    name
-    value := ← forallTelescope rv.type fun xs _ =>
-      let val := xs[rv.getFirstMinorIdx]!
-      let val := mkAppN val ⟨.map (xs[rv.getMajorIdx]!.proj iv.name) <| .range rv.rules[0]!.nfields⟩
-      mkLambdaFVars xs val
-    hints := .abbrev
-    safety := .safe
-  }
-  let levels := rv.levelParams.map .param
-  let old := .const rv.name levels
-  let new := .const name levels
-  let name ← mkFreshUserName <| rv.name.str "eq"
-  addDecl <| .mutualDefnDecl [{
-    name
-    levelParams := rv.levelParams
-    type := ← mkEq old new
-    value := .const name levels
-    hints := .opaque
-    safety := .partial
-  }]
-  Compiler.CSimp.add name .global
-  compileDefn <| ← getConstInfoDefn <| mkRecOnName iv.name
-  compileSizeOf iv
+private def compileStructOnly (iv : InductiveVal) (rv : RecursorVal) : MetaM Unit := do
+  let value ← forallTelescope rv.type fun xs _ =>
+    let val := xs[rv.getFirstMinorIdx]!
+    let val := mkAppN val ⟨.map (xs[rv.getMajorIdx]!.proj iv.name) <| .range rv.rules[0]!.nfields⟩
+    mkLambdaFVars xs val
+  go value
+where
+  go value := do
+    let name ← mkFreshUserName rv.name
+    addAndCompile' <| .defnDecl { rv with
+      name
+      value
+      hints := .abbrev
+      safety := .safe
+    }
+    let levels := rv.levelParams.map .param
+    let old := .const rv.name levels
+    let new := .const name levels
+    let name ← mkFreshUserName <| rv.name.str "eq"
+    addDecl <| .mutualDefnDecl [{
+      name
+      levelParams := rv.levelParams
+      type := ← mkEq old new
+      value := .const name levels
+      hints := .opaque
+      safety := .partial
+    }]
+    Compiler.CSimp.add name .global
+    compileDefn <| ← getConstInfoDefn <| mkRecOnName iv.name
 
 /--
-Generate compiled code for the recursor for `iv`.
+Generate compiled code for the recursor for `iv`, excluding the `sizeOf` function.
 -/
-def compileInductive (iv : InductiveVal) : MetaM Unit := do
-  let rv ← getConstInfoRec <| mkRecName iv.name
+def compileInductiveOnly (iv : InductiveVal) (rv : RecursorVal) (warn := true) : MetaM Unit := do
   if ← isProp rv.type then
-    logWarning m!"not compiling {rv.name}"
-    return
-  if (← getEnv).contains (rv.name.str "_cstage2") ||
-    (Compiler.CSimp.ext.getState (← getEnv)).map.contains rv.name
-  then
-    logWarning m!"already compiled {rv.name}"
+    if warn then logWarning m!"not compiling {rv.name}"
     return
   if !iv.isRec && rv.numMotives == 1 && iv.numCtors == 1 && iv.numIndices == 0 then
-    compileStruct iv rv
+    compileStructOnly iv rv
     return
   let levels := rv.levelParams.map .param
   let rvs ←
@@ -128,7 +137,7 @@ def compileInductive (iv : InductiveVal) : MetaM Unit := do
     else mkRecNames iv.all rv.numMotives |>.mapM getConstInfoRec
   let rvs ← rvs.mapM fun rv => return (rv, ← mkFreshUserName rv.name)
   let repl := rvs.foldl (fun l (rv, name) => .cons rv.name name l) .nil
-  addAndCompile <| .mutualDefnDecl <|← rvs.mapM fun (rv, name) => do
+  addAndCompile' <| .mutualDefnDecl <|← rvs.mapM fun (rv, name) => do
     pure { rv with
       name
       value := ← forallTelescope rv.type fun xs body => do
@@ -167,10 +176,49 @@ def compileInductive (iv : InductiveVal) : MetaM Unit := do
     }]
     Compiler.CSimp.add name .global
   for name in iv.all do
-    for aux in [mkRecOnName name, mkBRecOnName name] do
+    for aux in [mkRecOnName name, (mkBRecOnName name).str "go", mkBRecOnName name] do
       if let some (.defnInfo dv) := (← getEnv).find? aux then
         compileDefn dv
-  compileSizeOf iv
+
+mutual
+
+/--
+Generate compiled code for the recursor for `iv`.
+-/
+partial def compileInductive (iv : InductiveVal) (warn := true) : MetaM Unit := do
+  let rv ← getConstInfoRec <| mkRecName iv.name
+  if hasCSimpLemma (← getEnv) rv.name then
+    if warn then logWarning m!"already compiled {rv.name}"
+    return
+  compileInductiveOnly iv rv warn
+  compileSizeOf iv rv
+
+/--
+Compiles the `sizeOf` auxiliary functions. It also recursively compiles any inductives required to
+compile the `sizeOf` definition (because `sizeOf` definitions depend on `T.rec`).
+-/
+partial def compileSizeOf (iv : InductiveVal) (rv : RecursorVal) : MetaM Unit := do
+  let go aux := do
+    if let some (.defnInfo dv) := (← getEnv).find? aux then
+      if !hasCSimpLemma (← getEnv) aux then
+        let deps : NameSet := dv.value.foldConsts ∅ fun c arr =>
+          if let .str name "_sizeOf_inst" := c then arr.insert name else arr
+        for i in deps do
+          -- We only want to recompile inductives defined in external modules, because attempting
+          -- to recompile `sizeOf` functions defined in the current module multiple times will lead
+          -- to errors. An entire mutual block of inductives is compiled when compiling any
+          -- inductive within it, so every inductive within the same module can be explicitly
+          -- compiled using `compile_inductive%` if necessary.
+          if ((← getEnv).getModuleIdxFor? i).isSome then
+            if let some (.inductInfo iv) := (← getEnv).find? i then
+               compileInductive iv (warn := false)
+        compileDefn dv
+  for name in iv.all do
+    for i in [:rv.numMotives] do
+      go <| name.str s!"_sizeOf_{i+1}"
+    go <| name.str "_sizeOf_inst"
+
+end
 
 /--
 `compile_inductive% Foo` creates compiled code for the recursor `Foo.rec`,
@@ -178,11 +226,17 @@ so that `Foo.rec` can be used in a definition
 without having to mark the definition as `noncomputable`.
 -/
 elab tk:"compile_inductive% " i:ident : command => Command.liftTermElabM do
-  let n ← resolveGlobalConstNoOverloadWithInfo i
+  let n ← realizeGlobalConstNoOverloadWithInfo i
   let iv ← withRef i <| getConstInfoInduct n
   withRef tk <| compileInductive iv
 
-compile_inductive% Nat
+end Mathlib.Util
+
+-- `Nat.rec` already has a `@[csimp]` lemma in Lean.
+compile_def% Nat.recOn
+compile_def% Nat.brecOn.go
+compile_def% Nat.brecOn
+compile_inductive% Prod
 compile_inductive% List
 compile_inductive% PUnit
 compile_inductive% PEmpty
@@ -193,3 +247,34 @@ compile_inductive% False
 compile_inductive% Empty
 compile_inductive% Bool
 compile_inductive% Sigma
+compile_inductive% Option
+
+-- In addition to the manual implementation below, we also have to override the `Float.val` and
+-- `Float.mk` functions because these also have no implementation in core lean.
+-- Because `floatSpec.float` is an opaque type, the identity function is as good an implementation
+-- as any.
+private unsafe def Float.valUnsafe : Float → floatSpec.float := unsafeCast
+private unsafe def Float.mkUnsafe : floatSpec.float → Float := unsafeCast
+@[implemented_by Float.valUnsafe] private def Float.valImpl (x : Float) : floatSpec.float := x.1
+@[implemented_by Float.mkUnsafe] private def Float.mkImpl (x : floatSpec.float) : Float := ⟨x⟩
+@[csimp] private theorem Float.val_eq : @Float.val = Float.valImpl := rfl
+@[csimp] private theorem Float.mk_eq : @Float.mk = Float.mkImpl := rfl
+
+-- These types need manual implementations because the default implementation in `compileStruct`
+-- uses `Expr.proj` which has an invalid IR type.
+open Lean Meta Elab Mathlib.Util in
+run_cmd Command.liftTermElabM do
+  for n in [``UInt8, ``UInt16, ``UInt32, ``UInt64, ``USize, ``Float] do
+    let iv ← getConstInfoInduct n
+    let rv ← getConstInfoRec <| mkRecName n
+    let value ← Elab.Term.elabTerm (← `(fun H t => H t.1))
+      (← inferType (.const rv.name (rv.levelParams.map .param)))
+    compileStructOnly.go iv rv value
+    compileSizeOf iv rv
+
+-- These need special handling because `Lean.Name.sizeOf` and `Lean.instSizeOfName`
+-- were manually implemented as `noncomputable`
+compile_inductive% String
+compile_inductive% Lean.Name
+compile_def% Lean.Name.sizeOf
+compile_def% Lean.instSizeOfName

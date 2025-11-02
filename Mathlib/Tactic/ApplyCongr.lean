@@ -1,11 +1,10 @@
 /-
-Copyright (c) 2020 Scott Morrison. All rights reserved.
+Copyright (c) 2020 Kim Morrison. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
-Authors: Lucas Allen, Scott Morrison
+Authors: Lucas Allen, Kim Morrison
 -/
 
 import Mathlib.Tactic.Conv
-import Std.Tactic.OpenPrivate
 
 /-!
 ## Introduce the `apply_congr` conv mode tactic.
@@ -18,7 +17,6 @@ rewriting inside the operand of a `Finset.sum`.
 
 open Lean Expr Parser.Tactic Elab Command Elab.Tactic Meta Conv
 
-open private mkFun from Lean.Meta.AppBuilder in
 /--
 Apply a congruence lemma inside `conv` mode.
 
@@ -27,16 +25,16 @@ Otherwise `apply_congr e` will apply the lemma `e`.
 
 Recall that a goal that appears as `∣ X` in `conv` mode
 represents a goal of `⊢ X = ?m`,
-i.e. an equation with a metavariable for the right hand side.
+i.e. an equation with a metavariable for the right-hand side.
 
 To successfully use `apply_congr e`, `e` will need to be an equation
 (possibly after function arguments),
 which can be unified with a goal of the form `X = ?m`.
-The right hand side of `e` will then determine the metavariable,
-and `conv` will subsequently replace `X` with that right hand side.
+The right-hand side of `e` will then determine the metavariable,
+and `conv` will subsequently replace `X` with that right-hand side.
 
 As usual, `apply_congr` can create new goals;
-any of these which are _not_ equations with a metavariable on the right hand side
+any of these which are _not_ equations with a metavariable on the right-hand side
 will be hard to deal with in `conv` mode.
 Thus `apply_congr` automatically calls `intros` on any new goals,
 and fails if they are not then equations.
@@ -74,11 +72,12 @@ def Lean.Elab.Tactic.applyCongr (q : Option Expr) : TacticM Unit := do
     | none =>
       let congrTheorems ←
         (fun congrTheoremMap => congrTheoremMap.get lhsFun) <$> getSimpCongrTheorems
-      congrTheorems.mapM (fun congrTheorem => liftM <| Prod.fst <$> mkFun congrTheorem.theoremName)
+      congrTheorems.mapM (fun congrTheorem =>
+        liftM <| mkConstWithFreshMVarLevels congrTheorem.theoremName)
   if congrTheoremExprs == [] then
     throwError "No matching congr lemmas found"
   -- For every lemma:
-  liftMetaTactic <| fun mainGoal => congrTheoremExprs.firstM (fun congrTheoremExpr => do
+  liftMetaTactic fun mainGoal => congrTheoremExprs.firstM (fun congrTheoremExpr => do
     let newGoals ← mainGoal.apply congrTheoremExpr { newGoals := .nonDependentOnly }
     newGoals.mapM fun newGoal => Prod.snd <$> newGoal.intros)
 

@@ -1,35 +1,42 @@
 /-
 Copyright (c) 2021 Mario Carneiro. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
-Authors: Mario Carneiro
+Authors: Mario Carneiro, Kyle Miller
 -/
 import Lean
-import Std
-import Mathlib.Tactic.Cases
+import Mathlib.Tactic.PPWithUniv
+import Mathlib.Tactic.ExtendDoc
+import Mathlib.Tactic.Lemma
+import Mathlib.Tactic.TypeStar
+import Mathlib.Tactic.Linter.OldObtain
+import Mathlib.Tactic.Simproc.ExistsAndEq
+
+/-!
+# Basic tactics and utilities for tactic writing
+
+This file defines some basic utilities for tactic writing, and also
+- a dummy `variables` macro (which warns that the Lean 4 name is `variable`)
+- the `introv` tactic, which allows the user to automatically introduce the variables of a theorem
+and explicitly name the non-dependent hypotheses,
+- an `assumption` macro, calling the `assumption` tactic on all goals
+- the tactics `match_target` and `clear_aux_decl` (clearing all auxiliary declarations from the
+context).
+-/
 
 namespace Mathlib.Tactic
 open Lean Parser.Tactic Elab Command Elab.Tactic Meta
 
+/-- Syntax for the `variables` command: this command is just a stub,
+and merely warns that it has been renamed to `variable` in Lean 4. -/
 syntax (name := «variables») "variables" (ppSpace bracketedBinder)* : command
 
+/-- The `variables` command: this is just a stub,
+and merely warns that it has been renamed to `variable` in Lean 4. -/
 @[command_elab «variables»] def elabVariables : CommandElab
   | `(variables%$pos $binders*) => do
     logWarningAt pos "'variables' has been replaced by 'variable' in lean 4"
     elabVariable (← `(variable%$pos $binders*))
   | _ => throwUnsupportedSyntax
-
-/-- `lemma` means the same as `theorem`. It is used to denote "less important" theorems -/
-syntax (name := lemma) declModifiers
-  group("lemma " declId ppIndent(declSig) declVal Parser.Command.terminationSuffix) : command
-
-/-- Implementation of the `lemma` command, by macro expansion to `theorem`. -/
-@[macro «lemma»] def expandLemma : Macro := fun stx =>
-  -- FIXME: this should be a macro match, but terminationSuffix is not easy to bind correctly.
-  -- This implementation ensures that any future changes to `theorem` are reflected in `lemma`
-  let stx := stx.modifyArg 1 fun stx =>
-    let stx := stx.modifyArg 0 (mkAtomFrom · "theorem" (canonical := true))
-    stx.setKind ``Parser.Command.theorem
-  pure <| stx.setKind ``Parser.Command.declaration
 
 /-- Given two arrays of `FVarId`s, one from an old local context and the other from a new local
 context, pushes `FVarAliasInfo`s into the info tree for corresponding pairs of `FVarId`s.
@@ -37,122 +44,12 @@ Recall that variables linked this way should be considered to be semantically id
 
 The effect of this is, for example, the unused variable linter will see that variables
 from the first array are used if corresponding variables in the second array are used. -/
-def pushFVarAliasInfo [Monad m] [MonadInfoTree m]
+def pushFVarAliasInfo {m : Type → Type} [Monad m] [MonadInfoTree m]
     (oldFVars newFVars : Array FVarId) (newLCtx : LocalContext) : m Unit := do
   for old in oldFVars, new in newFVars do
     if old != new then
       let decl := newLCtx.get! new
       pushInfoLeaf (.ofFVarAliasInfo { id := new, baseId := old, userName := decl.userName })
-
-/-- Function to help do the revert/intro pattern, running some code inside a context
-where certain variables have been reverted before re-introing them.
-It will push `FVarId` alias information into info trees for you according to a simple protocol.
-
-- `fvarIds` is an array of `fvarIds` to revert. These are passed to
-  `Lean.MVarId.revert` with `preserveOrder := true`, hence the function
-  raises an error if they cannot be reverted in the provided order.
-- `k` is given the goal with all the variables reverted and
-  the array of reverted `FVarId`s, with the requested `FVarId`s at the beginning.
-  It must return a tuple of a value, an array describing which `FVarIds` to link,
-  and a mutated `MVarId`.
-
-The `a : Array (Option FVarId)` array returned by `k` is interpreted in the following way.
-The function will intro `a.size` variables, and then for each non-`none` entry we
-create an FVar alias between it and the corresponding `intro`ed variable.
-For example, having `k` return `fvars.map .some` causes all reverted variables to be
-`intro`ed and linked.
-
-Returns the value returned by `k` along with the resulting goal.
- -/
-def _root_.Lean.MVarId.withReverted (mvarId : MVarId) (fvarIds : Array FVarId)
-    (k : MVarId → Array FVarId → MetaM (α × Array (Option FVarId) × MVarId))
-    (clearAuxDeclsInsteadOfRevert := false) : MetaM (α × MVarId) := do
-  let (xs, mvarId) ← mvarId.revert fvarIds true clearAuxDeclsInsteadOfRevert
-  let (r, xs', mvarId) ← k mvarId xs
-  let (ys, mvarId) ← mvarId.introNP xs'.size
-  mvarId.withContext do
-    for x? in xs', y in ys do
-      if let some x := x? then
-        pushInfoLeaf (.ofFVarAliasInfo { id := y, baseId := x, userName := ← y.getUserName })
-  return (r, mvarId)
-
-/--
-Replace the type of the free variable `fvarId` with `typeNew`.
-
-If `checkDefEq = true` then throws an error if `typeNew` is not definitionally
-equal to the type of `fvarId`. Otherwise this function assumes `typeNew` and the type
-of `fvarId` are definitionally equal.
-
-This function is the same as `Lean.MVarId.changeLocalDecl` but makes sure to push substitution
-information into the infotree.
--/
-def _root_.Lean.MVarId.changeLocalDecl' (mvarId : MVarId) (fvarId : FVarId) (typeNew : Expr)
-    (checkDefEq := true) : MetaM MVarId := do
-  mvarId.checkNotAssigned `changeLocalDecl
-  let (_, mvarId) ← mvarId.withReverted #[fvarId] fun mvarId fvars => mvarId.withContext do
-    let check (typeOld : Expr) : MetaM Unit := do
-      if checkDefEq then
-        unless ← isDefEq typeNew typeOld do
-          throwTacticEx `changeLocalDecl mvarId
-            m!"given type{indentExpr typeNew}\nis not definitionally equal to{indentExpr typeOld}"
-    let finalize (targetNew : Expr) := do
-      return ((), fvars.map .some, ← mvarId.replaceTargetDefEq targetNew)
-    match ← mvarId.getType with
-    | .forallE n d b bi => do check d; finalize (.forallE n typeNew b bi)
-    | .letE n t v b ndep  => do check t; finalize (.letE n typeNew v b ndep)
-    | _ => throwTacticEx `changeLocalDecl mvarId "unexpected auxiliary target"
-  return mvarId
-
-/-- `change` can be used to replace the main goal or its local
-variables with definitionally equal ones.
-
-For example, if `n : ℕ` and the current goal is `⊢ n + 2 = 2`, then
-```lean
-change _ + 1 = _
-```
-changes the goal to `⊢ n + 1 + 1 = 2`. The tactic also applies to the local context.
-If `h : n + 2 = 2` and `h' : n + 3 = 4` are in the local context, then
-```lean
-change _ + 1 = _ at h h'
-```
-changes their types to be `h : n + 1 + 1 = 2` and `h' : n + 2 + 1 = 4`.
-
-Change is like `refine` in that every placeholder needs to be solved for by unification,
-but you can use named placeholders and `?_` where you want `change` to create new goals.
-
-The the tactic `show e` is interchangeable with `change e`, where the pattern `e` is applied to
-the main goal. -/
-elab_rules : tactic
-  | `(tactic| change $newType:term $[$loc:location]?) => do
-    withLocation (expandOptLocation (Lean.mkOptionalNode loc))
-      (atLocal := fun h ↦ do
-        let hTy ← h.getType
-        -- This is a hack to get the new type to elaborate in the same sort of way that
-        -- it would for a `show` expression for the goal.
-        let mvar ← mkFreshExprMVar none
-        let (_, mvars) ← elabTermWithHoles
-                          (← `(term | show $newType from $(← Term.exprToSyntax mvar))) hTy `change
-        liftMetaTactic fun mvarId ↦ do
-          return (← mvarId.changeLocalDecl' h (← inferType mvar)) :: mvars)
-      (atTarget := evalTactic <| ← `(tactic| show $newType))
-      (failed := fun _ ↦ throwError "change tactic failed")
-
-/--
-`by_cases p` makes a case distinction on `p`,
-resulting in two subgoals `h : p ⊢` and `h : ¬ p ⊢`.
--/
-macro "by_cases " e:term : tactic =>
-  `(tactic| by_cases $(mkIdent `h) : $e)
-
-syntax "transitivity" (ppSpace colGt term)? : tactic
-set_option hygiene false in
-macro_rules
-  | `(tactic| transitivity) => `(tactic| apply Nat.le_trans)
-  | `(tactic| transitivity $e) => `(tactic| apply Nat.le_trans (m := $e))
-set_option hygiene false in
-macro_rules
-  | `(tactic| transitivity) => `(tactic| apply Nat.lt_trans)
-  | `(tactic| transitivity $e) => `(tactic| apply Nat.lt_trans (m := $e))
 
 /--
 The tactic `introv` allows the user to automatically introduce the variables of a theorem and
@@ -212,7 +109,7 @@ where
 /-- Try calling `assumption` on all goals; succeeds if it closes at least one goal. -/
 macro "assumption'" : tactic => `(tactic| any_goals assumption)
 
-elab "match_target " t:term : tactic  => do
+elab "match_target " t:term : tactic => do
   withMainContext do
     let (val) ← elabTerm t (← inferType (← getMainTarget))
     if not (← isDefEq val (← getMainTarget)) then
@@ -226,35 +123,69 @@ elab (name := clearAuxDecl) "clear_aux_decl" : tactic => withMainContext do
       g ← g.tryClear ldec.fvarId
   replaceMainGoal [g]
 
-/-- Clears the value of the local definition `fvarId`. Ensures that the resulting goal state
-is still type correct. Throws an error if it is a local hypothesis without a value. -/
-def _root_.Lean.MVarId.clearValue (mvarId : MVarId) (fvarId : FVarId) : MetaM MVarId := do
-  mvarId.checkNotAssigned `clear_value
-  let tag ← mvarId.getTag
-  let (_, mvarId) ← mvarId.withReverted #[fvarId] fun mvarId' fvars => mvarId'.withContext do
-    let tgt ← mvarId'.getType
-    unless tgt.isLet do
-      mvarId.withContext <|
-        throwTacticEx `clear_value mvarId m!"{Expr.fvar fvarId} is not a local definition"
-    let tgt' := Expr.forallE tgt.letName! tgt.letType! tgt.letBody! .default
-    unless ← isTypeCorrect tgt' do
-      mvarId.withContext <|
-        throwTacticEx `clear_value mvarId
-          m!"cannot clear {Expr.fvar fvarId}, the resulting context is not type correct"
-    let mvarId'' ← mkFreshExprSyntheticOpaqueMVar tgt' tag
-    mvarId'.assign <| .app mvarId'' tgt.letValue!
-    return ((), fvars.map .some, mvarId''.mvarId!)
-  return mvarId
+attribute [pp_with_univ] ULift PUnit PEmpty
 
-/-- `clear_value n₁ n₂ ...` clears the bodies of the local definitions `n₁, n₂ ...`, changing them
-into regular hypotheses. A hypothesis `n : α := t` is changed to `n : α`.
+/-- Result of `withResetServerInfo`. -/
+structure withResetServerInfo.Result (α : Type) where
+  /-- Return value of the executed tactic. -/
+  result? : Option α
+  /-- Messages produced by the executed tactic. -/
+  msgs    : MessageLog
+  /-- Info trees produced by the executed tactic, wrapped in `CommandContextInfo.save`. -/
+  trees   : PersistentArray InfoTree
 
-The order of `n₁ n₂ ...` does not matter, and values will be cleared in reverse order of
-where they appear in the context. -/
-elab (name := clearValue) "clear_value" hs:(ppSpace colGt term:max)+ : tactic => do
-  let fvarIds ← getFVarIds hs
-  let fvarIds ← withMainContext <| sortFVarIds fvarIds
-  for fvarId in fvarIds.reverse do
-    withMainContext do
-      let mvarId ← (← getMainGoal).clearValue fvarId
-      replaceMainGoal [mvarId]
+/--
+Runs a tactic, returning any new messages and info trees rather than adding them to the state.
+-/
+def withResetServerInfo {α : Type} (t : TacticM α) :
+    TacticM (withResetServerInfo.Result α) := do
+  let (savedMsgs, savedTrees) ← modifyGetThe Core.State fun st =>
+    ((st.messages, st.infoState.trees), { st with messages := {}, infoState.trees := {} })
+  Prod.snd <$> MonadFinally.tryFinally' t fun result? => do
+    let msgs  ← Core.getMessageLog
+    let ist   ← getInfoState
+    let trees ← ist.trees.mapM fun tree => do
+      let tree := tree.substitute ist.assignment
+      let ctx := .commandCtx <| ← CommandContextInfo.save
+      return InfoTree.context ctx tree
+    modifyThe Core.State fun st =>
+      { st with messages := savedMsgs, infoState.trees := savedTrees }
+    return { result?, msgs, trees }
+
+end Mathlib.Tactic
+
+/-- A mathlib library note: the note's content should be contained in its doc-string. -/
+def LibraryNote := Unit
+
+open Lean in
+/-- `library_note2 «my note» /-- documentation -/` creates a library note named `my note`
+in the `Mathlib.LibraryNote` namespace, whose content is `/-- documentation -/`.
+You can access this note using, for example, `#print Mathlib.LibraryNote.«my note»`.
+-/
+macro "library_note2 " name:ident ppSpace dc:docComment : command =>
+  `($dc:docComment def $(mkIdent (Name.append `Mathlib.LibraryNote name.getId)) : LibraryNote := ())
+
+open Lean Elab Command in
+/-- Support the old `library_note "foo"` syntax, with a deprecation warning. -/
+elab "library_note2 " name:str ppSpace dc:docComment : command => do
+  logWarningAt name <|
+    "deprecation warning: library_note2 now takes an identifier instead of a string.\n" ++
+    "Hint: replace the double quotes with «french quotes»."
+  let name := Name.mkSimple name.getString
+  let stx ← `(library_note2 $(mkIdent name):ident $dc:docComment)
+  elabCommandTopLevel stx
+
+library_note2 «partially-applied ext lemmas»
+/--
+When possible, `ext` lemmas are stated without a full set of arguments. As an example, for bundled
+homs `f`, `g`, and `of`, `f.comp of = g.comp of → f = g` is a better `ext` lemma than
+`(∀ x, f (of x) = g (of x)) → f = g`, as the former allows a second type-specific extensionality
+lemmas to be applied to `f.comp of = g.comp of`.
+If the domain of `of` is `ℕ` or `ℤ` and `of` is a `RingHom`, such a lemma could then make the goal
+`f (of 1) = g (of 1)`.
+
+For bundled morphisms, there is a `ext` lemma that always applies of the form
+`(∀ x, ⇑f x = ⇑g x) → f = g`. When adding type-specific `ext` lemmas like the one above, we want
+these to be tried first. This happens automatically since the type-specific lemmas are inevitably
+defined later.
+-/
